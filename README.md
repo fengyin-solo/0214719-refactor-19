@@ -90,13 +90,55 @@ docker buildx build --platform linux/amd64,linux/arm64 -t billiard-user:latest .
 
 ### 切换真实API
 
-修改环境变量即可切换到真实后端：
+修改环境变量即可切换到真实后端，页面代码无需改动：
 
 ```bash
 # .env.production
 VITE_USE_MOCK=false
 VITE_API_BASE_URL=https://api.your-domain.com
 ```
+
+#### 统一响应契约（Mock 与真实接口一致）
+
+所有接口（成功/空数据/失败）都返回同一结构，页面与请求层不再各自解析：
+
+```jsonc
+// 成功（data 为 [] 或 {} 时表示"空数据"，仍是成功）
+{ "success": true,  "data": { /* 业务数据 */ }, "error": null, "code": null, "retried": 0 }
+
+// 失败（error 为可直接展示的中文文案）
+{ "success": false, "data": null, "error": "请求超时，请稍后重试", "code": "TIMEOUT", "retried": 0 }
+```
+
+| code | 含义 | 自动重试 |
+|------|------|----------|
+| `TIMEOUT` | 请求超时（默认 8s） | 仅 GET/HEAD 自动重试 |
+| `NETWORK` | 网络中断/无法连接 | 仅 GET/HEAD 自动重试 |
+| `HTTP_ERROR` | 服务端 5xx | 仅 GET/HEAD 自动重试 |
+| `BUSINESS_ERROR` | 4xx 或业务失败 | 不重试，由用户重新发起 |
+| `ABORTED` | 请求被取消 | 不重试 |
+
+- **重试边界**：`VITE_REQUEST_RETRY` 控制 GET 重试次数（默认 1）；POST/PUT/DELETE 等写操作绝不自动重试，失败后弹窗保留、用户再次点击即重新请求。
+- **加载规则**：首次请求展示整页加载；重新请求（切分类/翻页/刷新）保留旧数据并显示"正在刷新"；失败展示统一错误页与"重试"按钮。
+
+后端只需按以下约定响应即可完成对接（请求层会自动解包）：
+
+- 成功：HTTP 2xx，body 直接为业务数据（数组/对象），或信封 `{ "success": true, "data": ... }`、`{ "code": 0, "data": ... }`
+- 失败：HTTP 4xx/5xx，body 为 `{ "error": "错误文案" }` 或 `{ "message": "..." }`；缺省时按状态码生成提示
+- 鉴权：请求头自动携带 `Authorization: Bearer <token>`
+
+#### 接口清单
+
+| 模块 | 方法 | 路径 |
+|------|------|------|
+| 认证 | POST | `/auth/login`、`/auth/logout` |
+| 球桌 | GET | `/tables`、`/tables/time-slots` |
+| 预约 | GET/POST | `/bookings` |
+| 课程 | GET | `/courses`、POST `/courses/enroll` |
+| 赛事 | GET | `/competitions`、POST `/competitions/join` |
+| 商城 | GET | `/products`、POST | `/orders` |
+| 用户 | GET/PUT | `/user/profile`、GET `/user/points`、GET `/user/gifts` |
+| 任务 | GET/POST | `/user/tasks`（POST action: pay/cancel/confirm/remind） |
 
 ## 环境变量配置
 
@@ -116,6 +158,9 @@ VITE_API_BASE_URL=https://api.your-domain.com
 | `VITE_APP_TITLE` | string | 台球俱乐部 | 应用标题，显示在浏览器标签页 |
 | `VITE_USE_MOCK` | boolean | true | 是否使用模拟数据。`true`使用前端Mock，`false`调用真实API |
 | `VITE_API_BASE_URL` | string | /api | API基础地址。模拟模式下无效，真实模式下配置后端地址 |
+| `VITE_REQUEST_TIMEOUT` | number | 8000 | 请求超时时间（毫秒） |
+| `VITE_REQUEST_RETRY` | number | 1 | GET 请求自动重试次数（超时/网络/5xx），写操作不自动重试 |
+| `VITE_MOCK_DELAY` | number | 随机500-1000ms | 模拟延迟毫秒数，留空为随机延迟 |
 | `VITE_LOG_LEVEL` | string | info | 日志级别：`debug`/`info`/`warn`/`error` |
 
 ### 配置示例

@@ -8,7 +8,7 @@
  * - 错误处理
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { api, logger } from '../utils/api'
 
 // ==================== API接口测试 ====================
@@ -203,9 +203,110 @@ describe('API Module', () => {
   describe('api.getBookings', () => {
     it('should return bookings list', async () => {
       const result = await api.getBookings()
-      
+
       expect(result.success).toBe(true)
       expect(Array.isArray(result.data)).toBe(true)
+    })
+  })
+
+  // ---------- 新增统一接口测试 ----------
+
+  describe('api.getTimeSlots', () => {
+    it('should return available time slots', async () => {
+      const result = await api.getTimeSlots()
+
+      expect(result.success).toBe(true)
+      expect(Array.isArray(result.data)).toBe(true)
+      expect(result.data.length).toBeGreaterThan(0)
+      expect(result.data[0]).toHaveProperty('time')
+      expect(result.data[0]).toHaveProperty('available')
+    })
+  })
+
+  describe('api.enrollCourse', () => {
+    it('should return course order with CR order number and expire date', async () => {
+      const result = await api.enrollCourse({ courseId: 1 })
+
+      expect(result.success).toBe(true)
+      expect(result.data.orderNo).toMatch(/^CR\d+$/)
+      expect(result.data.courseName).toBeTruthy()
+      expect(result.data.expireDate).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    })
+  })
+
+  describe('api.joinCompetition', () => {
+    it('should return registration number and player number', async () => {
+      const result = await api.joinCompetition({ competitionId: 1 })
+
+      expect(result.success).toBe(true)
+      expect(result.data.regNo).toMatch(/^REG\d+$/)
+      expect(result.data.compName).toBeTruthy()
+      expect(result.data.playerNo).toBeGreaterThan(0)
+    })
+  })
+
+  describe('api.createOrder with cart items', () => {
+    it('should return complete order with amount and createTime', async () => {
+      const result = await api.createOrder({
+        items: [{ id: 1, name: '球杆', price: 100, qty: 2 }],
+        amount: 200
+      })
+
+      expect(result.success).toBe(true)
+      expect(result.data.orderNo).toMatch(/^SP\d+$/)
+      expect(result.data.amount).toBe(200)
+      expect(result.data.items).toHaveLength(1)
+      expect(result.data.status).toBe('paid')
+      expect(result.data.createTime).toBeTruthy()
+    })
+  })
+
+  describe('api.getProducts filtering', () => {
+    it('should filter by category and sort by price', async () => {
+      const asc = await api.getProducts({ category: 'cue', sort: 'price-asc' })
+      expect(asc.success).toBe(true)
+      asc.data.forEach(p => expect(p.category).toBe('cue'))
+      const prices = asc.data.map(p => p.price)
+      expect(prices).toEqual([...prices].sort((a, b) => a - b))
+    })
+  })
+
+  describe('api.updateProfile / points / gifts', () => {
+    it('should update and return the merged profile', async () => {
+      const result = await api.updateProfile({ name: '张三丰' })
+      expect(result.success).toBe(true)
+      expect(result.data.name).toBe('张三丰')
+      // 恢复基础数据，避免影响其它用例
+      await api.updateProfile({ name: '张三' })
+    })
+
+    it('should return points history and gifts lists', async () => {
+      const [points, gifts] = await Promise.all([api.getPointsHistory(), api.getGifts()])
+      expect(points.success).toBe(true)
+      expect(gifts.success).toBe(true)
+      expect(points.data.length).toBeGreaterThan(0)
+      expect(gifts.data.length).toBeGreaterThan(0)
+    })
+  })
+
+  describe('api.getTasks / doTaskAction', () => {
+    it('should return enriched tasks with type/status display fields', async () => {
+      const result = await api.getTasks()
+
+      expect(result.success).toBe(true)
+      expect(Array.isArray(result.data)).toBe(true)
+      const task = result.data[0]
+      if (task) {
+        expect(task).toHaveProperty('typeName')
+        expect(task).toHaveProperty('statusText')
+        expect(Array.isArray(task.actions)).toBe(true)
+      }
+    })
+
+    it('should reject pay action for unknown task', async () => {
+      const result = await api.doTaskAction({ taskId: 'not-exist', action: 'pay' })
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('支付失败')
     })
   })
 })

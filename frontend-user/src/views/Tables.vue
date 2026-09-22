@@ -33,17 +33,18 @@
       </div>
     </div>
 
-    <div class="tables-grid" :class="{ loading: isLoadingTables }">
-      <div v-if="isLoadingTables" class="loading-overlay">
-        <div class="loading-spinner"></div>
-        <span>加载中...</span>
-      </div>
-      <div 
-        v-for="table in filteredTables" 
-        :key="table.id" 
-        class="table-card"
-        :class="{ available: table.available, unavailable: !table.available }"
-      >
+    <AsyncState :state="tablesRes">
+      <div class="tables-grid" :class="{ loading: tablesRes.refreshing }">
+        <div v-if="tablesRes.refreshing" class="loading-overlay">
+          <div class="loading-spinner"></div>
+          <span>加载中...</span>
+        </div>
+        <div
+          v-for="table in filteredTables"
+          :key="table.id"
+          class="table-card"
+          :class="{ available: table.available, unavailable: !table.available }"
+        >
         <div class="card-header">
           <div class="table-type-badge">{{ table.type }}</div>
           <div class="status-indicator" :class="table.available ? 'online' : 'offline'">
@@ -91,8 +92,9 @@
             </button>
           </div>
         </div>
+        </div>
       </div>
-    </div>
+    </AsyncState>
 
     <!-- Booking Modal -->
     <Modal
@@ -212,20 +214,21 @@
 import Modal from '../components/Modal.vue'
 import Toast from '../components/Toast.vue'
 import LoginModal from '../components/LoginModal.vue'
+import AsyncState from '../components/AsyncState.vue'
 import { isAuthenticated } from '../utils/auth'
 import { taskStore } from '../utils/taskStore'
+import { api } from '../utils/api'
+import { useRequest, useAction } from '../utils/useRequest'
 
 export default {
   name: 'Tables',
-  components: { Modal, Toast, LoginModal },
+  components: { Modal, Toast, LoginModal, AsyncState },
   data() {
     return {
       selectedType: 'all',
       selectedDate: new Date().toISOString().split('T')[0],
-      isLoadingTables: false,
       showBookingModal: false,
       showSuccessModal: false,
-      bookingLoading: false,
       selectedTable: null,
       bookingDate: new Date().toISOString().split('T')[0],
       selectedTimeSlot: 1,
@@ -239,34 +242,33 @@ export default {
       toastMessage: '',
       showLoginModal: false,
       pendingTable: null,
+      // 球桌列表：统一加载/错误/重试规则
+      tablesRes: useRequest(params => api.getTables(params)),
+      // 时段列表
+      timeSlotsRes: useRequest(() => api.getTimeSlots(), { initialData: [] }),
+      // 创建预约写操作
+      bookingAction: useAction(data => api.bookTable(data)),
       tableTypes: [
         { id: 'all', name: '全部', icon: '🎱' },
         { id: 'snooker', name: '斯诺克', icon: '🟢' },
         { id: 'pool', name: '美式九球', icon: '🟡' },
         { id: 'chinese', name: '中式八球', icon: '⚫' }
-      ],
-      timeSlots: [
-        { id: 1, time: '10:00 - 12:00', available: true },
-        { id: 2, time: '12:00 - 14:00', available: true },
-        { id: 3, time: '14:00 - 16:00', available: true },
-        { id: 4, time: '16:00 - 18:00', available: false },
-        { id: 5, time: '18:00 - 20:00', available: true },
-        { id: 6, time: '20:00 - 22:00', available: true }
-      ],
-      tables: [
-        { id: 1, name: '1号球桌', type: '斯诺克', typeId: 'snooker', price: 80, available: true, size: '12尺', brand: '星牌' },
-        { id: 2, name: '2号球桌', type: '斯诺克', typeId: 'snooker', price: 80, available: false, size: '12尺', brand: '星牌' },
-        { id: 3, name: '3号球桌', type: '美式九球', typeId: 'pool', price: 60, available: true, size: '9尺', brand: 'Brunswick' },
-        { id: 4, name: '4号球桌', type: '美式九球', typeId: 'pool', price: 60, available: true, size: '9尺', brand: 'Brunswick' },
-        { id: 5, name: '5号球桌', type: '中式八球', typeId: 'chinese', price: 50, available: false, size: '9尺', brand: '乔氏' },
-        { id: 6, name: '6号球桌', type: '中式八球', typeId: 'chinese', price: 50, available: true, size: '9尺', brand: '乔氏' }
       ]
     }
   },
   computed: {
+    tables() {
+      return Array.isArray(this.tablesRes.data) ? this.tablesRes.data : []
+    },
+    timeSlots() {
+      return this.timeSlotsRes.data || []
+    },
     filteredTables() {
       if (this.selectedType === 'all') return this.tables
       return this.tables.filter(t => t.typeId === this.selectedType)
+    },
+    bookingLoading() {
+      return this.bookingAction.pending
     },
     today() {
       return new Date().toISOString().split('T')[0]
@@ -277,17 +279,13 @@ export default {
       this.loadTablesForDate()
     }
   },
+  mounted() {
+    this.loadTablesForDate()
+    this.timeSlotsRes.run()
+  },
   methods: {
-    async loadTablesForDate() {
-      this.isLoadingTables = true
-      // 模拟API请求延迟
-      await new Promise(resolve => setTimeout(resolve, 800))
-      // 模拟不同日期的球桌可用状态变化
-      this.tables = this.tables.map(table => ({
-        ...table,
-        available: Math.random() > 0.3
-      }))
-      this.isLoadingTables = false
+    loadTablesForDate() {
+      this.tablesRes.run({ date: this.selectedDate })
     },
     openBooking(table) {
       // 检查是否已登录
@@ -313,34 +311,45 @@ export default {
       }
     },
     async confirmBooking() {
-      this.bookingLoading = true
-      
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1500))
-      
       const slot = this.timeSlots.find(s => s.id === this.selectedTimeSlot)
-      const orderNo = 'BK' + Date.now().toString().slice(-8)
+      const payload = {
+        tableId: this.selectedTable.id,
+        tableName: this.selectedTable.name,
+        date: this.bookingDate,
+        time: slot ? slot.time : '',
+        timeSlot: slot ? slot.time : this.selectedTimeSlot,
+        duration: this.duration,
+        price: this.selectedTable.price
+      }
+
+      const result = await this.bookingAction.execute(payload)
+
+      if (!result?.success) {
+        // 失败不关闭弹窗，用户可修正后再次提交（写操作不做自动重试）
+        this.showNotification('error', '预约失败', result?.error || '请稍后重试')
+        return
+      }
+
+      const orderNo = result.data.orderNo
       this.bookingResult = {
         orderNo,
         tableName: this.selectedTable.name,
         date: this.bookingDate,
-        time: slot.time
+        time: slot ? slot.time : ''
       }
-      this.successMessage = `${this.bookingDate} ${slot.time}`
-      
+      this.successMessage = `${this.bookingDate} ${slot ? slot.time : ''}`
+
       // 添加到任务中心
-      const bookingInfo = {
+      taskStore.addBookingTask(this.selectedTable, {
         orderNo,
         date: this.bookingDate,
-        time: slot.time,
+        time: slot ? slot.time : '',
         duration: this.duration
-      }
-      taskStore.addBookingTask(this.selectedTable, bookingInfo)
-      
-      this.bookingLoading = false
+      })
+
       this.showBookingModal = false
       this.showSuccessModal = true
-      
+
       this.showNotification('info', '已添加到任务中心', `您可以在任务中心查看并管理此预约`)
     },
     showNotification(type, title, message) {

@@ -37,6 +37,11 @@
           </select>
         </div>
 
+        <AsyncState
+          :state="productsRes"
+          empty-icon="🛒"
+          empty-text="该分类下暂无商品"
+        >
         <div class="products-grid">
           <div v-for="product in sortedProducts" :key="product.id" class="product-card" @click="openProductDetail(product)">
             <div class="product-image">
@@ -63,6 +68,7 @@
             </div>
           </div>
         </div>
+        </AsyncState>
       </main>
     </div>
 
@@ -189,12 +195,15 @@
 import Modal from '../components/Modal.vue'
 import Toast from '../components/Toast.vue'
 import LoginModal from '../components/LoginModal.vue'
+import AsyncState from '../components/AsyncState.vue'
 import { isAuthenticated } from '../utils/auth'
 import { taskStore } from '../utils/taskStore'
+import { api } from '../utils/api'
+import { useRequest, useAction } from '../utils/useRequest'
 
 export default {
   name: 'Shop',
-  components: { Modal, Toast, LoginModal },
+  components: { Modal, Toast, LoginModal, AsyncState },
   data() {
     return {
       selectedCategory: 'all',
@@ -203,7 +212,6 @@ export default {
       showCartModal: false,
       showCheckoutModal: false,
       showSuccessModal: false,
-      checkoutLoading: false,
       selectedProduct: null,
       quantity: 1,
       cart: [],
@@ -217,41 +225,53 @@ export default {
       showLoginModal: false,
       pendingAction: null,
       pendingProduct: null,
+      // 商品列表：分类/排序变化统一重新请求，错误/超时可重试
+      productsRes: useRequest(params => api.getProducts(params), { initialData: [] }),
+      // 创建订单写操作
+      checkoutAction: useAction(data => api.createOrder(data)),
       categories: [
         { id: 'all', name: '全部商品', icon: '🏷️' },
         { id: 'cue', name: '球杆', icon: '🏏' },
         { id: 'ball', name: '台球', icon: '🎱' },
         { id: 'accessory', name: '配件', icon: '🔧' },
         { id: 'clothing', name: '服装', icon: '👔' }
-      ],
-      products: [
-        { id: 1, name: 'LP专业斯诺克球杆', brand: 'LP', price: 2999, originalPrice: 3599, category: 'cue', icon: '🏏', description: '进口白蜡木杆身，专业级配置', sales: 328, hot: true },
-        { id: 2, name: 'Predator美式九球杆', brand: 'Predator', price: 4599, category: 'cue', icon: '🏏', description: '碳纤维前节，低偏转技术', sales: 156, new: true },
-        { id: 3, name: '星牌比赛用球', brand: '星牌', price: 1299, originalPrice: 1499, category: 'ball', icon: '🎱', description: '国际比赛标准，酚醛树脂材质', sales: 892, hot: true },
-        { id: 4, name: 'Aramith水晶球套装', brand: 'Aramith', price: 2199, category: 'ball', icon: '🎱', description: '比利时进口，透明水晶材质', sales: 234 },
-        { id: 5, name: 'Master专业巧克粉', brand: 'Master', price: 39, category: 'accessory', icon: '🧊', description: '美国原装进口，防滑效果好', sales: 2341, hot: true },
-        { id: 6, name: '球杆延长器', brand: 'Generic', price: 199, originalPrice: 259, category: 'accessory', icon: '🔧', description: '铝合金材质，轻便耐用', sales: 567 },
-        { id: 7, name: 'Kamui台球手套', brand: 'Kamui', price: 89, category: 'accessory', icon: '🧤', description: '日本进口，透气舒适', sales: 1234 },
-        { id: 8, name: '专业比赛马甲', brand: 'Billiard Pro', price: 299, category: 'clothing', icon: '🎽', description: '修身剪裁，舒适透气', sales: 445, new: true }
       ]
     }
   },
   computed: {
+    products() {
+      return Array.isArray(this.productsRes.data) ? this.productsRes.data : []
+    },
+    checkoutLoading() {
+      return this.checkoutAction.pending
+    },
     filteredProducts() {
+      // 分类为页面展示维度，基于接口返回的全量列表在本地过滤（计数与旧行为一致）
       if (this.selectedCategory === 'all') return this.products
       return this.products.filter(p => p.category === this.selectedCategory)
     },
     sortedProducts() {
-      let result = [...this.filteredProducts]
-      if (this.sortBy === 'price-asc') result.sort((a, b) => a.price - b.price)
-      else if (this.sortBy === 'price-desc') result.sort((a, b) => b.price - a.price)
-      return result
+      // 排序已在请求层完成，这里直接引用，避免页面重复解析
+      return this.filteredProducts
     },
     cartTotal() { return this.cart.reduce((sum, item) => sum + item.price * item.qty, 0) },
     cartItemCount() { return this.cart.reduce((sum, item) => sum + item.qty, 0) }
   },
+  watch: {
+    sortBy() {
+      this.loadProducts()
+    }
+  },
+  mounted() {
+    this.loadProducts()
+  },
   methods: {
+    loadProducts() {
+      // 列表取全量（保证侧栏分类计数稳定），排序交由接口；分类为纯展示过滤
+      this.productsRes.run({ sort: this.sortBy })
+    },
     getCategoryCount(catId) {
+      // 分类计数基于当前已加载数据；切换分类后以接口返回为准
       if (catId === 'all') return this.products.length
       return this.products.filter(p => p.category === catId).length
     },
@@ -321,26 +341,28 @@ export default {
       this.showCheckoutModal = true
     },
     async confirmCheckout() {
-      this.checkoutLoading = true
-      await new Promise(resolve => setTimeout(resolve, 1500))
-      const order = {
-        orderNo: 'SP' + Date.now().toString().slice(-8),
-        amount: this.cartTotal,
+      const payload = {
         items: [...this.cart],
-        status: 'paid',
-        createTime: new Date().toLocaleString()
+        amount: this.cartTotal
       }
+      const result = await this.checkoutAction.execute(payload)
+
+      if (!result?.success) {
+        this.showNotification('error', '下单失败', result?.error || '请稍后重试')
+        return
+      }
+
+      const order = result.data
       this.orderResult = order
-      this.orders.unshift(order) // 添加到订单列表
+      this.orders.unshift(order)
       this.cart = []
-      
+
       // 添加到任务中心
       taskStore.addOrderTask(order)
-      
-      this.checkoutLoading = false
+
       this.showCheckoutModal = false
       this.showSuccessModal = true
-      
+
       this.showNotification('info', '已添加到任务中心', `您可以在任务中心查看并管理此订单`)
     },
     showNotification(type, title, message) {

@@ -48,6 +48,7 @@
 
         <section class="bookings-section">
           <div class="section-header"><h3>最近预约</h3><button class="btn-view-all" @click="viewAllBookings">查看全部</button></div>
+          <AsyncState :state="bookingsRes" empty-icon="📅" empty-text="暂无预约记录">
           <div class="bookings-list">
             <div v-for="booking in recentBookings" :key="booking.id" class="booking-card" @click="viewBookingDetail(booking)">
               <div class="booking-date"><span class="day">{{ getDay(booking.date) }}</span><span class="month">{{ getMonth(booking.date) }}</span></div>
@@ -55,6 +56,7 @@
               <div class="booking-status" :class="booking.status">{{ statusText[booking.status] }}</div>
             </div>
           </div>
+          </AsyncState>
         </section>
 
         <section class="actions-section">
@@ -124,12 +126,14 @@
 <script>
 import Modal from '../components/Modal.vue'
 import Toast from '../components/Toast.vue'
+import AsyncState from '../components/AsyncState.vue'
 import { authState, logout } from '../utils/auth'
-import { logger } from '../utils/api'
+import { api, logger } from '../utils/api'
+import { useRequest, useAction } from '../utils/useRequest'
 
 export default {
   name: 'Profile',
-  components: { Modal, Toast },
+  components: { Modal, Toast, AsyncState },
   data() {
     return {
       activeNav: 'info',
@@ -139,7 +143,6 @@ export default {
       showBookingDetailModal: false,
       showLogoutModal: false,
       showSuccessModal: false,
-      saveLoading: false,
       selectedBooking: null,
       successTitle: '',
       successMessage: '',
@@ -149,35 +152,36 @@ export default {
       toastMessage: '',
       editForm: { name: '', phone: '', email: '' },
       statusText: { completed: '已完成', upcoming: '待使用', cancelled: '已取消' },
-      recentBookings: [
-        { id: 1, orderNo: 'BK20260001', tableName: '3号球桌 - 美式九球', date: '2026-02-15', time: '14:00 - 16:00', status: 'upcoming' },
-        { id: 2, orderNo: 'BK20260002', tableName: '1号球桌 - 斯诺克', date: '2026-02-10', time: '19:00 - 21:00', status: 'completed' },
-        { id: 3, orderNo: 'BK20260003', tableName: '5号球桌 - 中式八球', date: '2026-02-08', time: '10:00 - 12:00', status: 'completed' }
-      ],
+      // 最近预约 / 积分明细 / 礼品：统一请求状态
+      bookingsRes: useRequest(() => api.getBookings(), { initialData: [] }),
+      pointsRes: useRequest(() => api.getPointsHistory(), { initialData: [] }),
+      giftsRes: useRequest(() => api.getGifts(), { initialData: [] }),
+      // 更新资料写操作
+      profileAction: useAction(data => api.updateProfile(data)),
       quickActions: [
         { id: 1, name: '任务中心', icon: '📋', action: 'tasks' },
         { id: 2, name: '优惠券', icon: '🎫', action: 'coupon' },
         { id: 3, name: '邀请好友', icon: '👥', action: 'invite' },
         { id: 4, name: '意见反馈', icon: '💬', action: 'feedback' },
         { id: 5, name: '帮助中心', icon: '❓', action: 'help' }
-      ],
-      pointsHistory: [
-        { id: 1, title: '预约消费奖励', date: '2026-02-10', amount: 50, type: 'add' },
-        { id: 2, title: '课程报名奖励', date: '2026-02-08', amount: 100, type: 'add' },
-        { id: 3, title: '兑换优惠券', date: '2026-02-05', amount: 200, type: 'minus' },
-        { id: 4, title: '比赛获奖', date: '2026-01-20', amount: 500, type: 'add' }
-      ],
-      gifts: [
-        { id: 1, name: '10元优惠券', icon: '🎫', points: 200 },
-        { id: 2, name: '1小时免费打球', icon: '🎱', points: 500 },
-        { id: 3, name: '专业巧克粉', icon: '🧊', points: 300 },
-        { id: 4, name: '台球手套', icon: '🧤', points: 800 }
       ]
     }
   },
   computed: {
     user() {
       return authState.user || { id: '', name: '游客', level: '普通', points: 0, totalHours: 0, competitions: 0, wins: 0, courses: 0 }
+    },
+    recentBookings() {
+      return Array.isArray(this.bookingsRes.data) ? this.bookingsRes.data : []
+    },
+    pointsHistory() {
+      return Array.isArray(this.pointsRes.data) ? this.pointsRes.data : []
+    },
+    gifts() {
+      return Array.isArray(this.giftsRes.data) ? this.giftsRes.data : []
+    },
+    saveLoading() {
+      return this.profileAction.pending
     }
   },
   mounted() {
@@ -186,6 +190,9 @@ export default {
       phone: this.user.phone || '',
       email: this.user.email || ''
     }
+    this.bookingsRes.run()
+    this.pointsRes.run()
+    this.giftsRes.run()
   },
   methods: {
     getDay(date) { return new Date(date).getDate() },
@@ -217,12 +224,24 @@ export default {
         this.showNotification('error', '验证失败', '请输入正确的邮箱地址')
         return
       }
-      this.saveLoading = true
-      await new Promise(resolve => setTimeout(resolve, 1000))
-      if (authState.user) {
+      const result = await this.profileAction.execute({
+        name: this.editForm.name,
+        phone: this.editForm.phone,
+        email: this.editForm.email
+      })
+
+      if (!result?.success) {
+        this.showNotification('error', '保存失败', result?.error || '请稍后重试')
+        return
+      }
+
+      // 与本地登录态保持同步（真实接口返回的最新资料）
+      if (authState.user && result.data) {
+        Object.assign(authState.user, result.data)
+        localStorage.setItem('billiard_user', JSON.stringify(authState.user))
+      } else if (authState.user) {
         authState.user.name = this.editForm.name
       }
-      this.saveLoading = false
       this.showEditModal = false
       this.showNotification('success', '保存成功', '个人资料已更新')
       logger.info('Profile updated', { name: this.editForm.name })
