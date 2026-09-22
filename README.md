@@ -90,12 +90,25 @@ docker buildx build --platform linux/amd64,linux/arm64 -t billiard-user:latest .
 
 ### 切换真实API
 
-修改环境变量即可切换到真实后端：
+修改环境变量即可切换到真实后端，页面无需改动（响应结构、错误码、加载规则由 `src/utils/http.js` 统一归一化）：
 
 ```bash
 # .env.production
 VITE_USE_MOCK=false
 VITE_API_BASE_URL=https://api.your-domain.com
+VITE_HTTP_TIMEOUT=10000
+```
+
+### 异常场景验证
+
+不重新构建即可验证空数据、超时、异常与重新请求：
+
+```js
+// 浏览器控制台
+__setMockScenario('empty')    // 列表页显示统一空数据占位
+__setMockScenario('timeout')  // GET 自动重试；耗尽后显示「重新加载」
+__setMockScenario('error')    // 模拟 500 异常
+__resetMockScenario()         // 恢复正常
 ```
 
 ## 环境变量配置
@@ -117,6 +130,8 @@ VITE_API_BASE_URL=https://api.your-domain.com
 | `VITE_USE_MOCK` | boolean | true | 是否使用模拟数据。`true`使用前端Mock，`false`调用真实API |
 | `VITE_API_BASE_URL` | string | /api | API基础地址。模拟模式下无效，真实模式下配置后端地址 |
 | `VITE_LOG_LEVEL` | string | info | 日志级别：`debug`/`info`/`warn`/`error` |
+| `VITE_HTTP_TIMEOUT` | number | 10000 | 单次请求超时时间（毫秒） |
+| `VITE_MOCK_SCENARIO` | string | success | 模拟场景：`success`/`empty`/`timeout`/`error`/`random` |
 
 ### 配置示例
 
@@ -336,29 +351,80 @@ window.addEventListener('unhandledrejection', (event) => {
 })
 ```
 
-### 2. API请求错误处理
+### 2. 统一响应结构（mock 与真实接口一致）
+
+所有请求（`src/utils/http.js`）只返回一种响应包，页面不再各自判断字段：
+
 ```javascript
-// api.js
-async function request(url, options) {
-  try {
-    const response = await fetch(url, options)
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
-    }
-    return { success: true, data: await response.json() }
-  } catch (error) {
-    logger.error(`API Error: ${url}`, error)
-    return { success: false, error: error.message }
-  }
-}
+// 成功
+{ success: true, data: <业务数据>, empty: false, code: 'OK' }
+// 空数据（data 为 null / [] / {} 时 empty=true）
+{ success: true, data: [], empty: true, code: 'OK' }
+// 失败（不抛异常给页面）
+{ success: false, error: '用户可见错误文案', code: 'TIMEOUT', status: 0, retriable: true }
 ```
 
-### 3. 用户友好提示
+真实后端可以返回标准包 `{ success, data/result, error/message, code }`，也可以直接返回
+裸数组/裸对象，请求层会统一归一化，调用方始终读取 `result.data`，切换后端不会因字段差异失效。
+
+### 3. 错误反馈与重试边界
+
+| 类型 | code 示例 | 是否自动重试 | 说明 |
+|------|-----------|--------------|------|
+| 超时 | `TIMEOUT` | GET 默认重试 | AbortController 统一控制，默认 10s |
+| 网络断开 | `NETWORK_ERROR` | GET 默认重试 | 友好文案「网络连接失败…」 |
+| HTTP 500/502/503/504/408/429 | `HTTP_503` | GET 默认重试 | 默认重试 2 次，间隔递增 |
+| HTTP 4xx（400/401/403/404） | `HTTP_404` | 不重试 | 401 提示重新登录 |
+| 业务失败（success:false） | 业务码 | 不重试 | 如「用户名或密码错误」「库存不足」 |
+| 写操作（POST/PUT/DELETE） | - | 默认不重试 | 避免重复下单/支付，可由 `retries` 覆盖 |
+
+GET 默认重试 2 次；列表加载失败时 `RequestState` 展示「重新加载」按钮（手动重新请求）；
+已有数据时刷新失败只提示 Toast 并保留旧数据，不进入整页错误态。
+
+### 4. 页面统一加载规则
+
+- `createListResource(loader)`：统一管理 `loading / success / error / empty` 与去重、竞态保护
+- `createAction(fn)`：统一管理提交按钮 loading 与错误反馈
+- `<RequestState :resource="..." />`：统一加载中转圈、空数据占位、错误提示 + 重试按钮
+- 模拟数据集中在 `src/mock/data.js`（唯一数据源），路由在 `src/mock/adapter.js`，
+  写操作成功后由适配器统一写入任务中心，页面不再直接操作 taskStore
+
+### 5. 场景模拟与验证（成功/空数据/超时/异常/重新请求）
+
+无需重新构建即可切换 mock 场景：
+
+```bash
+# .env.development 中配置
+VITE_MOCK_SCENARIO=success  # success|empty|timeout|error|random
+```
+
+```javascript
+// 浏览器控制台
+__setMockScenario('empty')    // 所有列表页显示空数据
+__setMockScenario('timeout')  // 触发超时与 GET 自动重试，重试耗尽显示重试按钮
+__setMockScenario('error')    // 模拟服务异常
+__resetMockScenario()         // 恢复成功
+```
+
+### 6. 切换真实接口（可验证）
+
+```bash
+# .env.production
+VITE_USE_MOCK=false
+VITE_API_BASE_URL=https://api.your-domain.com
+```
+
+切换后无需改动任何页面：接口方法（`api.getTables()` 等）、响应字段（`result.data`）、
+错误处理（`result.error`）与加载规则完全一致。可用 `src/__tests__/http-real.test.js`
+中的 fetch 模拟方式对照验证真实后端返回（标准包或裸数据均可）。
+
+### 7. 用户友好提示
 - Toast组件：显示操作结果（成功/失败/警告）
 - Modal组件：确认危险操作
+- RequestState组件：统一加载/空数据/加载失败+重新请求
 - 表单验证：实时输入校验
 
-### 4. 日志级别
+### 8. 日志级别
 | 级别 | 说明 | 示例 |
 |------|------|------|
 | DEBUG | 调试信息 | API请求详情 |
@@ -390,12 +456,19 @@ async function request(url, options) {
         ├── components/
         │   ├── Modal.vue
         │   ├── Toast.vue
+        │   ├── RequestState.vue  # 统一加载/空数据/错误重试
         │   ├── NavBar.vue
         │   ├── FooterBar.vue
         │   └── LoginModal.vue
         ├── utils/
-        │   ├── api.js
-        │   └── auth.js
+        │   ├── http.js           # 统一请求层（响应包/超时/重试/资源工厂）
+        │   ├── api.js            # 业务接口声明（薄封装）
+        │   ├── logger.js
+        │   ├── auth.js
+        │   └── taskStore.js
+        ├── mock/
+        │   ├── data.js           # 模拟数据唯一数据源
+        │   └── adapter.js        # 模拟路由（与真实后端同构）
         ├── views/          # 6个页面
         │   ├── Home.vue
         │   ├── Tables.vue

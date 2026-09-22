@@ -48,13 +48,21 @@
 
         <section class="bookings-section">
           <div class="section-header"><h3>最近预约</h3><button class="btn-view-all" @click="viewAllBookings">查看全部</button></div>
-          <div class="bookings-list">
-            <div v-for="booking in recentBookings" :key="booking.id" class="booking-card" @click="viewBookingDetail(booking)">
-              <div class="booking-date"><span class="day">{{ getDay(booking.date) }}</span><span class="month">{{ getMonth(booking.date) }}</span></div>
-              <div class="booking-info"><h4>{{ booking.tableName }}</h4><p class="booking-time"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>{{ booking.time }}</p></div>
-              <div class="booking-status" :class="booking.status">{{ statusText[booking.status] }}</div>
+          <RequestState
+            :resource="bookingsRes"
+            compact
+            hide-empty
+            @retry="bookingsRes.retry()"
+          >
+            <div class="bookings-list">
+              <div v-for="booking in recentBookings" :key="booking.id" class="booking-card" @click="viewBookingDetail(booking)">
+                <div class="booking-date"><span class="day">{{ getDay(booking.date) }}</span><span class="month">{{ getMonth(booking.date) }}</span></div>
+                <div class="booking-info"><h4>{{ booking.tableName }}</h4><p class="booking-time"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>{{ booking.time }}</p></div>
+                <div class="booking-status" :class="booking.status">{{ statusText[booking.status] }}</div>
+              </div>
+              <div v-if="recentBookings.length === 0" class="bookings-empty">暂无预约记录</div>
             </div>
-          </div>
+          </RequestState>
         </section>
 
         <section class="actions-section">
@@ -71,7 +79,7 @@
     </div>
 
     <!-- Edit Profile Modal -->
-    <Modal v-model="showEditModal" title="编辑资料" size="small" confirm-text="保存" :loading="saveLoading" @confirm="saveProfile">
+    <Modal v-model="showEditModal" title="编辑资料" size="small" confirm-text="保存" :loading="saveAction.loading" @confirm="saveProfile">
       <div class="edit-form">
         <div class="form-group"><label>昵称</label><input v-model="editForm.name" type="text" placeholder="请输入昵称" /></div>
         <div class="form-group"><label>手机号</label><input v-model="editForm.phone" type="tel" placeholder="请输入手机号" /></div>
@@ -124,12 +132,13 @@
 <script>
 import Modal from '../components/Modal.vue'
 import Toast from '../components/Toast.vue'
+import RequestState from '../components/RequestState.vue'
 import { authState, logout } from '../utils/auth'
-import { logger } from '../utils/api'
+import { logger, api, createListResource, createAction, errorMessage } from '../utils/api'
 
 export default {
   name: 'Profile',
-  components: { Modal, Toast },
+  components: { Modal, Toast, RequestState },
   data() {
     return {
       activeNav: 'info',
@@ -139,7 +148,6 @@ export default {
       showBookingDetailModal: false,
       showLogoutModal: false,
       showSuccessModal: false,
-      saveLoading: false,
       selectedBooking: null,
       successTitle: '',
       successMessage: '',
@@ -149,11 +157,10 @@ export default {
       toastMessage: '',
       editForm: { name: '', phone: '', email: '' },
       statusText: { completed: '已完成', upcoming: '待使用', cancelled: '已取消' },
-      recentBookings: [
-        { id: 1, orderNo: 'BK20260001', tableName: '3号球桌 - 美式九球', date: '2026-02-15', time: '14:00 - 16:00', status: 'upcoming' },
-        { id: 2, orderNo: 'BK20260002', tableName: '1号球桌 - 斯诺克', date: '2026-02-10', time: '19:00 - 21:00', status: 'completed' },
-        { id: 3, orderNo: 'BK20260003', tableName: '5号球桌 - 中式八球', date: '2026-02-08', time: '10:00 - 12:00', status: 'completed' }
-      ],
+      // 预约记录资源：统一 loading/error/重试
+      bookingsRes: createListResource(() => api.getBookings()),
+      // 资料保存：统一按钮 loading 与错误反馈
+      saveAction: createAction((payload) => api.updateProfile(payload)),
       quickActions: [
         { id: 1, name: '任务中心', icon: '📋', action: 'tasks' },
         { id: 2, name: '优惠券', icon: '🎫', action: 'coupon' },
@@ -178,6 +185,9 @@ export default {
   computed: {
     user() {
       return authState.user || { id: '', name: '游客', level: '普通', points: 0, totalHours: 0, competitions: 0, wins: 0, courses: 0 }
+    },
+    recentBookings() {
+      return this.bookingsRes.data
     }
   },
   mounted() {
@@ -186,6 +196,7 @@ export default {
       phone: this.user.phone || '',
       email: this.user.email || ''
     }
+    this.bookingsRes.run()
   },
   methods: {
     getDay(date) { return new Date(date).getDate() },
@@ -217,12 +228,17 @@ export default {
         this.showNotification('error', '验证失败', '请输入正确的邮箱地址')
         return
       }
-      this.saveLoading = true
-      await new Promise(resolve => setTimeout(resolve, 1000))
-      if (authState.user) {
-        authState.user.name = this.editForm.name
+      const result = await this.saveAction.run({
+        name: this.editForm.name,
+        phone: this.editForm.phone,
+        email: this.editForm.email
+      })
+      if (!result.success) {
+        this.showNotification('error', '保存失败', errorMessage(result, '资料保存失败，请稍后重试'))
+        return
       }
-      this.saveLoading = false
+      // 统一响应结构：后端返回更新后的用户资料，直接同步本地状态
+      if (authState.user && result.data) Object.assign(authState.user, result.data)
       this.showEditModal = false
       this.showNotification('success', '保存成功', '个人资料已更新')
       logger.info('Profile updated', { name: this.editForm.name })
@@ -305,6 +321,7 @@ export default {
 .stat-label { font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem; }
 .bookings-section { background: var(--bg-card); border: 1px solid var(--border); border-radius: 20px; padding: 1.5rem; }
 .bookings-list { display: flex; flex-direction: column; gap: 0.75rem; }
+.bookings-empty { padding: 1.5rem; text-align: center; color: var(--text-muted); font-size: 0.85rem; }
 .booking-card { display: flex; align-items: center; gap: 1.25rem; padding: 1rem 1.25rem; background: rgba(255, 255, 255, 0.02); border-radius: 14px; transition: all 0.3s; cursor: pointer; }
 .booking-card:hover { background: rgba(255, 255, 255, 0.04); }
 .booking-date { display: flex; flex-direction: column; align-items: center; min-width: 50px; }

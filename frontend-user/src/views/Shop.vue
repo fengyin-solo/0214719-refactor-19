@@ -37,7 +37,14 @@
           </select>
         </div>
 
-        <div class="products-grid">
+        <RequestState
+          :resource="productsRes"
+          class="products-grid"
+          empty-icon="🛍️"
+          empty-title="暂无相关商品"
+          empty-desc="换个分类看看吧"
+          @retry="productsRes.retry()"
+        >
           <div v-for="product in sortedProducts" :key="product.id" class="product-card" @click="openProductDetail(product)">
             <div class="product-image">
               <div class="image-placeholder">{{ product.icon }}</div>
@@ -62,7 +69,7 @@
               </div>
             </div>
           </div>
-        </div>
+        </RequestState>
       </main>
     </div>
 
@@ -135,7 +142,7 @@
     </Modal>
 
     <!-- Checkout Modal -->
-    <Modal v-model="showCheckoutModal" icon="🛒" icon-type="info" title="确认订单" size="small" confirm-text="确认支付" :loading="checkoutLoading" @confirm="confirmCheckout">
+    <Modal v-model="showCheckoutModal" icon="🛒" icon-type="info" title="确认订单" size="small" confirm-text="确认支付" :loading="checkoutAction.loading" @confirm="confirmCheckout">
       <div class="checkout-info">
         <div class="info-row"><span class="label">商品数量</span><span class="value">{{ cartItemCount }} 件</span></div>
         <div class="info-row total"><span class="label">应付金额</span><span class="value price">¥{{ cartTotal }}</span></div>
@@ -189,12 +196,13 @@
 import Modal from '../components/Modal.vue'
 import Toast from '../components/Toast.vue'
 import LoginModal from '../components/LoginModal.vue'
+import RequestState from '../components/RequestState.vue'
 import { isAuthenticated } from '../utils/auth'
-import { taskStore } from '../utils/taskStore'
+import { api, createListResource, createAction, errorMessage } from '../utils/api'
 
 export default {
   name: 'Shop',
-  components: { Modal, Toast, LoginModal },
+  components: { Modal, Toast, LoginModal, RequestState },
   data() {
     return {
       selectedCategory: 'all',
@@ -203,12 +211,11 @@ export default {
       showCartModal: false,
       showCheckoutModal: false,
       showSuccessModal: false,
-      checkoutLoading: false,
       selectedProduct: null,
       quantity: 1,
       cart: [],
       orderResult: null,
-      orders: [], // 订单列表
+      orders: [], // 订单列表（当前会话）
       showOrdersModal: false, // 订单列表弹框
       showToast: false,
       toastType: 'success',
@@ -217,26 +224,23 @@ export default {
       showLoginModal: false,
       pendingAction: null,
       pendingProduct: null,
+      // 商品列表资源：统一 loading/error/empty/重试
+      productsRes: createListResource(() => api.getProducts()),
+      // 下单提交：统一按钮 loading 与错误反馈
+      checkoutAction: createAction((payload) => api.createOrder(payload)),
       categories: [
         { id: 'all', name: '全部商品', icon: '🏷️' },
         { id: 'cue', name: '球杆', icon: '🏏' },
         { id: 'ball', name: '台球', icon: '🎱' },
         { id: 'accessory', name: '配件', icon: '🔧' },
         { id: 'clothing', name: '服装', icon: '👔' }
-      ],
-      products: [
-        { id: 1, name: 'LP专业斯诺克球杆', brand: 'LP', price: 2999, originalPrice: 3599, category: 'cue', icon: '🏏', description: '进口白蜡木杆身，专业级配置', sales: 328, hot: true },
-        { id: 2, name: 'Predator美式九球杆', brand: 'Predator', price: 4599, category: 'cue', icon: '🏏', description: '碳纤维前节，低偏转技术', sales: 156, new: true },
-        { id: 3, name: '星牌比赛用球', brand: '星牌', price: 1299, originalPrice: 1499, category: 'ball', icon: '🎱', description: '国际比赛标准，酚醛树脂材质', sales: 892, hot: true },
-        { id: 4, name: 'Aramith水晶球套装', brand: 'Aramith', price: 2199, category: 'ball', icon: '🎱', description: '比利时进口，透明水晶材质', sales: 234 },
-        { id: 5, name: 'Master专业巧克粉', brand: 'Master', price: 39, category: 'accessory', icon: '🧊', description: '美国原装进口，防滑效果好', sales: 2341, hot: true },
-        { id: 6, name: '球杆延长器', brand: 'Generic', price: 199, originalPrice: 259, category: 'accessory', icon: '🔧', description: '铝合金材质，轻便耐用', sales: 567 },
-        { id: 7, name: 'Kamui台球手套', brand: 'Kamui', price: 89, category: 'accessory', icon: '🧤', description: '日本进口，透气舒适', sales: 1234 },
-        { id: 8, name: '专业比赛马甲', brand: 'Billiard Pro', price: 299, category: 'clothing', icon: '🎽', description: '修身剪裁，舒适透气', sales: 445, new: true }
       ]
     }
   },
   computed: {
+    products() {
+      return this.productsRes.data
+    },
     filteredProducts() {
       if (this.selectedCategory === 'all') return this.products
       return this.products.filter(p => p.category === this.selectedCategory)
@@ -249,6 +253,9 @@ export default {
     },
     cartTotal() { return this.cart.reduce((sum, item) => sum + item.price * item.qty, 0) },
     cartItemCount() { return this.cart.reduce((sum, item) => sum + item.qty, 0) }
+  },
+  mounted() {
+    this.productsRes.run()
   },
   methods: {
     getCategoryCount(catId) {
@@ -321,26 +328,28 @@ export default {
       this.showCheckoutModal = true
     },
     async confirmCheckout() {
-      this.checkoutLoading = true
-      await new Promise(resolve => setTimeout(resolve, 1500))
-      const order = {
-        orderNo: 'SP' + Date.now().toString().slice(-8),
-        amount: this.cartTotal,
-        items: [...this.cart],
-        status: 'paid',
-        createTime: new Date().toLocaleString()
+      const items = this.cart.map(item => ({
+        productId: item.id,
+        name: item.name,
+        icon: item.icon,
+        quantity: item.qty,
+        qty: item.qty
+      }))
+      const result = await this.checkoutAction.run({ items, amount: this.cartTotal })
+      if (!result.success) {
+        this.showNotification('error', '下单失败', errorMessage(result, '订单提交失败，请稍后重试'))
+        return
       }
+
+      // 统一响应结构：成功结果统一取自 result.data
+      const order = result.data
       this.orderResult = order
       this.orders.unshift(order) // 添加到订单列表
       this.cart = []
-      
-      // 添加到任务中心
-      taskStore.addOrderTask(order)
-      
-      this.checkoutLoading = false
+
       this.showCheckoutModal = false
       this.showSuccessModal = true
-      
+
       this.showNotification('info', '已添加到任务中心', `您可以在任务中心查看并管理此订单`)
     },
     showNotification(type, title, message) {

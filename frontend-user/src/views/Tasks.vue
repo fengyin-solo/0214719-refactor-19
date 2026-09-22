@@ -76,13 +76,18 @@
       </div>
       </div>
 
-      <div v-if="filteredTasks.length > 0" class="tasks-list">
-      <div
-        v-for="task in filteredTasks"
-        :key="task.id"
-        class="task-card"
-        :class="[task.statusType, task.type]"
+      <RequestState
+        :resource="tasksRes"
+        class="tasks-list"
+        hide-empty
+        @retry="tasksRes.retry()"
       >
+        <div
+          v-for="task in filteredTasks"
+          :key="task.id"
+          class="task-card"
+          :class="[task.statusType, task.type]"
+        >
         <div class="task-header">
           <div class="task-type">
             <span class="type-icon">{{ task.typeIcon }}</span>
@@ -122,9 +127,9 @@
           </button>
         </div>
       </div>
-      </div>
+      </RequestState>
 
-      <div v-else class="empty-state">
+      <div v-if="tasksRes.status === 'success' && filteredTasks.length === 0" class="empty-state">
       <div class="empty-icon">📋</div>
       <h3>暂无{{ activeTab === 'pending' ? '待处理' : '已完成' }}任务</h3>
       <p>{{ activeType === 'all' ? '当前没有' : getTypeText }}记录</p>
@@ -139,7 +144,7 @@
       :subtitle="paySubtitle"
       size="small"
       confirm-text="确认支付"
-      :loading="payLoading"
+      :loading="payAction.loading"
       @confirm="confirmPay"
     >
       <div class="pay-info">
@@ -171,7 +176,7 @@
       size="small"
       confirm-text="确认取消"
       confirm-type="danger"
-      :loading="cancelLoading"
+      :loading="cancelAction.loading"
       @confirm="confirmCancel"
     />
 
@@ -240,13 +245,13 @@
 <script>
 import Modal from '../components/Modal.vue'
 import Toast from '../components/Toast.vue'
-import { logger } from '../utils/api'
+import RequestState from '../components/RequestState.vue'
+import { logger, api, createListResource, createAction, errorMessage } from '../utils/api'
 import { authState } from '../utils/auth'
-import { taskStore } from '../utils/taskStore'
 
 export default {
   name: 'Tasks',
-  components: { Modal, Toast },
+  components: { Modal, Toast, RequestState },
   data() {
     return {
       activeTab: 'pending',
@@ -256,15 +261,18 @@ export default {
       showCancelModal: false,
       showDetailModal: false,
       showSuccessModal: false,
-      payLoading: false,
-      cancelLoading: false,
       successTitle: '',
       successMessage: '',
       showToast: false,
       toastType: 'success',
       toastTitle: '',
       toastMessage: '',
-      refreshKey: 0
+      // 任务列表资源：统一 loading/error/重试
+      tasksRes: createListResource(() => api.getTasks()),
+      // 任务操作：统一按钮 loading 与错误反馈
+      payAction: createAction((payload) => api.doTaskAction(payload)),
+      cancelAction: createAction((payload) => api.doTaskAction(payload)),
+      taskAction: createAction((payload) => api.doTaskAction(payload))
     }
   },
   computed: {
@@ -273,8 +281,7 @@ export default {
       return '确认支付 ¥' + this.selectedTask.amount.toLocaleString() + ' 元'
     },
     allTasks() {
-      this.refreshKey
-      return taskStore.getAll()
+      return this.tasksRes.data
     },
     pendingTasks() {
       return this.allTasks.filter(task => task.status !== 'completed' && task.status !== 'cancelled')
@@ -308,8 +315,16 @@ export default {
     this.refreshTasks()
   },
   methods: {
+    /**
+     * 重新请求任务列表（静默刷新：保留旧数据，失败不进入整页错误）
+     */
     refreshTasks() {
-      this.refreshKey++
+      return this.tasksRes.run({}, {
+        silent: true,
+        onError: (result) => {
+          this.showNotification('error', '刷新失败', errorMessage(result, '任务列表刷新失败'))
+        }
+      })
     },
     getTypeText() {
       const typeMap = {
@@ -325,12 +340,12 @@ export default {
     },
     handleAction(task, action) {
       this.selectedTask = { ...task }
-      
+
       if (action.route) {
         this.navigateToRoute(action.route, action.key, task)
         return
       }
-      
+
       const actionMap = {
         pay: () => this.openPayModal(),
         cancel: () => this.openCancelModal(),
@@ -346,7 +361,7 @@ export default {
     },
     navigateToRoute(route, actionKey, task) {
       logger.info('Navigate to business page', { route, actionKey, taskId: task.id, type: task.type })
-      
+
       const query = {}
       if (task.extra) {
         if (task.type === 'booking' && task.extra.tableId) {
@@ -362,7 +377,7 @@ export default {
           query.orderNo = task.extra.orderNo
         }
       }
-      
+
       this.$router.push({ path: route, query })
     },
     openPayModal() {
@@ -376,55 +391,50 @@ export default {
     },
     async confirmPay() {
       if (!this.selectedTask) return
-      this.payLoading = true
-      
-      await new Promise(resolve => setTimeout(resolve, 1000))
-      
-      const updatedTask = taskStore.markAsPaid(this.selectedTask.id)
-      
-      this.payLoading = false
+      const result = await this.payAction.run({ taskId: this.selectedTask.id, action: 'pay' })
+
       this.showPayModal = false
-      
-      if (updatedTask) {
-        this.refreshTasks()
+      if (result.success) {
+        await this.refreshTasks()
         this.successTitle = '支付成功'
         this.successMessage = '您的订单已支付成功'
         this.showSuccessModal = true
         logger.info('Payment successful', { taskId: this.selectedTask.id, amount: this.selectedTask.amount })
       } else {
-        this.showNotification('error', '支付失败', '请稍后重试')
+        this.showNotification('error', '支付失败', errorMessage(result, '请稍后重试'))
       }
     },
     async confirmCancel() {
       if (!this.selectedTask) return
-      this.cancelLoading = true
-      
-      await new Promise(resolve => setTimeout(resolve, 800))
-      
-      const result = taskStore.remove(this.selectedTask.id)
-      
-      this.cancelLoading = false
+      const result = await this.cancelAction.run({ taskId: this.selectedTask.id, action: 'cancel' })
+
       this.showCancelModal = false
-      
-      if (result) {
-        this.refreshTasks()
+      if (result.success) {
+        await this.refreshTasks()
         this.showNotification('success', '取消成功', '任务已取消')
         logger.info('Task cancelled', { taskId: this.selectedTask.id })
       } else {
-        this.showNotification('error', '取消失败', '请稍后重试')
+        this.showNotification('error', '取消失败', errorMessage(result, '请稍后重试'))
       }
     },
     async handleRemind() {
       if (!this.selectedTask) return
-      this.showNotification('success', '已提醒', '已提醒卖家尽快发货')
-      logger.info('Reminder sent', { taskId: this.selectedTask.id })
+      const result = await this.taskAction.run({ taskId: this.selectedTask.id, action: 'remind' })
+      if (result.success) {
+        this.showNotification('success', '已提醒', '已提醒卖家尽快发货')
+        logger.info('Reminder sent', { taskId: this.selectedTask.id })
+      } else {
+        this.showNotification('error', '操作失败', errorMessage(result, '请稍后重试'))
+      }
     },
-    handleConfirm() {
+    async handleConfirm() {
       if (!this.selectedTask) return
-      const result = taskStore.updateStatus(this.selectedTask.id, 'completed')
-      if (result) {
-        this.refreshTasks()
+      const result = await this.taskAction.run({ taskId: this.selectedTask.id, action: 'confirm' })
+      if (result.success) {
+        await this.refreshTasks()
         this.showNotification('success', '确认收货成功', '感谢您的购买')
+      } else {
+        this.showNotification('error', '操作失败', errorMessage(result, '请稍后重试'))
       }
     },
     handleReview() {

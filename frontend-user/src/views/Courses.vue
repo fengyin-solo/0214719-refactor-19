@@ -8,10 +8,17 @@
       </div>
     </header>
 
-    <div class="courses-grid">
-      <div 
-        v-for="course in courses" 
-        :key="course.id" 
+    <RequestState
+      :resource="coursesRes"
+      class="courses-grid"
+      empty-icon="📚"
+      empty-title="暂无可报名课程"
+      empty-desc="新课程正在筹备中，请稍后再来查看"
+      @retry="coursesRes.retry()"
+    >
+      <div
+        v-for="course in courses"
+        :key="course.id"
         class="course-card"
         @click="openCourseDetail(course)"
       >
@@ -67,7 +74,7 @@
         
         <div class="card-hover-effect"></div>
       </div>
-    </div>
+    </RequestState>
 
     <!-- Course Detail Modal -->
     <Modal
@@ -141,7 +148,7 @@
       :subtitle="enrollCourse?.name"
       size="small"
       confirm-text="确认支付"
-      :loading="enrollLoading"
+      :loading="enrollAction.loading"
       @confirm="confirmEnroll"
     >
       <div v-if="enrollCourse" class="enroll-info">
@@ -228,101 +235,42 @@
 import Modal from '../components/Modal.vue'
 import Toast from '../components/Toast.vue'
 import LoginModal from '../components/LoginModal.vue'
+import RequestState from '../components/RequestState.vue'
 import { isAuthenticated } from '../utils/auth'
-import { taskStore } from '../utils/taskStore'
+import { api, createListResource, createAction, errorMessage } from '../utils/api'
 
 export default {
   name: 'Courses',
-  components: { Modal, Toast, LoginModal },
+  components: { Modal, Toast, LoginModal, RequestState },
   data() {
     return {
       showDetailModal: false,
       showEnrollModal: false,
       showSuccessModal: false,
       showMyCoursesModal: false, // 我的课程弹框
-      enrollLoading: false,
       selectedCourse: null,
       enrollCourse: null,
       enrollResult: null,
-      myCourses: [], // 已报名课程列表
+      myCourses: [], // 已报名课程列表（当前会话）
       showToast: false,
       toastType: 'success',
       toastTitle: '',
       toastMessage: '',
       showLoginModal: false,
       pendingCourse: null,
-      courses: [
-        {
-          id: 1,
-          name: '台球入门基础课',
-          icon: '🎯',
-          level: '入门',
-          duration: '4周',
-          lessons: '8课时',
-          students: 156,
-          price: 599,
-          originalPrice: 799,
-          description: '从零开始学习台球，掌握基本姿势、握杆方法和击球技巧，适合完全没有基础的新手',
-          coach: '张明',
-          coachTitle: '高级教练',
-          coachBio: '10年教学经验，培养学员超过500人，擅长基础教学和纠正动作',
-          gradient: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-          outline: ['台球基础知识介绍', '正确的站姿与握杆', '基本击球动作练习', '直线球练习', '简单角度球', '基础走位概念', '实战练习', '结业考核']
-        },
-        {
-          id: 2,
-          name: '斯诺克进阶训练',
-          icon: '🎱',
-          level: '进阶',
-          duration: '6周',
-          lessons: '12课时',
-          students: 89,
-          price: 1299,
-          originalPrice: 1599,
-          description: '深入学习斯诺克战术布局，提升走位和防守能力，掌握高级杆法技巧',
-          coach: '李强',
-          coachTitle: '国家级教练',
-          coachBio: '前省队选手，15年执教经验，多次带队获得全国比赛冠军',
-          gradient: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-          outline: ['斯诺克规则深度解析', '高级杆法：低杆与高杆', '塞球技术详解', '走位规划与执行', '防守策略', '清台技巧', '比赛心态调整', '模拟比赛训练']
-        },
-        {
-          id: 3,
-          name: '九球高级技巧',
-          icon: '🏆',
-          level: '高级',
-          duration: '8周',
-          lessons: '16课时',
-          students: 45,
-          price: 1999,
-          originalPrice: 2499,
-          description: '掌握高级杆法、塞球技术和复杂局面处理，提升比赛实战能力',
-          coach: '王磊',
-          coachTitle: '职业选手',
-          coachBio: '现役职业选手，全国九球锦标赛前八，擅长实战技巧教学',
-          gradient: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-          outline: ['九球比赛规则与策略', '开球技巧优化', '组合球与翻袋', '高级塞球应用', '困难球处理', '安全球战术', '关键球心理', '实战对抗训练']
-        },
-        {
-          id: 4,
-          name: '比赛心理训练',
-          icon: '🧠',
-          level: '专业',
-          duration: '3周',
-          lessons: '6课时',
-          students: 32,
-          price: 999,
-          description: '提升比赛心理素质，学习压力管理和专注力训练，突破瓶颈期',
-          coach: '赵芳',
-          coachTitle: '运动心理师',
-          coachBio: '国家认证运动心理咨询师，服务多支省级运动队',
-          gradient: 'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',
-          outline: ['运动心理学基础', '压力与焦虑管理', '专注力训练方法', '比赛前心理准备', '失误后的心态调整', '建立自信心']
-        }
-      ]
+      // 课程列表资源：统一 loading/error/empty/重试
+      coursesRes: createListResource(() => api.getCourses()),
+      // 报名提交：统一按钮 loading 与错误反馈
+      enrollAction: createAction((payload) => api.enrollCourse(payload))
     }
   },
   computed: {
+    courses() {
+      return this.coursesRes.data
+    }
+  },
+  mounted() {
+    this.coursesRes.run()
   },
   methods: {
     openCourseDetail(course) {
@@ -349,37 +297,19 @@ export default {
       }
     },
     async confirmEnroll() {
-      this.enrollLoading = true
-      
-      await new Promise(resolve => setTimeout(resolve, 1500))
-      
-      const expireDate = new Date()
-      expireDate.setMonth(expireDate.getMonth() + 6)
-      const orderNo = 'CR' + Date.now().toString().slice(-8)
-      
-      const courseOrder = {
-        orderNo,
-        courseName: this.enrollCourse.name,
-        courseIcon: this.enrollCourse.icon,
-        coach: this.enrollCourse.coach,
-        lessons: this.enrollCourse.lessons,
-        price: this.enrollCourse.price,
-        expireDate: expireDate.toISOString().split('T')[0],
-        createTime: new Date().toLocaleString(),
-        progress: 0
+      const result = await this.enrollAction.run({ courseId: this.enrollCourse.id })
+      if (!result.success) {
+        this.showNotification('error', '报名失败', errorMessage(result, '课程报名失败，请稍后重试'))
+        return
       }
-      
-      this.enrollResult = courseOrder
-      this.myCourses.unshift(courseOrder) // 添加到我的课程
-      
-      // 添加到任务中心
-      const enrollInfo = { orderNo }
-      taskStore.addCourseTask(this.enrollCourse, enrollInfo)
-      
-      this.enrollLoading = false
+
+      // 统一响应结构：成功结果统一取自 result.data
+      this.enrollResult = result.data
+      this.myCourses.unshift(result.data)
+
       this.showEnrollModal = false
       this.showSuccessModal = true
-      
+
       this.showNotification('info', '已添加到任务中心', `您可以在任务中心查看并管理此课程`)
     },
     goToMyCourses() {

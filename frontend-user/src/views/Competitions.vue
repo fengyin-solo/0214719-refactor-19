@@ -18,7 +18,12 @@
       </div>
     </div>
 
-    <div class="competitions-list">
+    <RequestState
+      :resource="competitionsRes"
+      hide-empty
+      class="competitions-list"
+      @retry="competitionsRes.retry()"
+    >
       <div v-for="comp in filteredCompetitions" :key="comp.id" class="competition-card" :class="comp.status">
         <div class="card-left">
           <div class="date-block">
@@ -58,16 +63,16 @@
           <div class="progress" :style="{ width: (comp.participants / comp.maxParticipants * 100) + '%' }"></div>
         </div>
       </div>
-    </div>
+    </RequestState>
 
-    <div v-if="filteredCompetitions.length === 0" class="empty-state">
+    <div v-if="competitionsRes.status === 'success' && filteredCompetitions.length === 0" class="empty-state">
       <div class="empty-icon">🏆</div>
       <h3>暂无{{ tabs.find(t => t.id === activeTab)?.name }}赛事</h3>
       <p>请关注其他类型的赛事或稍后再来查看</p>
     </div>
 
     <!-- Join Modal -->
-    <Modal v-model="showJoinModal" icon="🏆" icon-type="info" title="报名参赛" :subtitle="selectedComp?.name" size="small" confirm-text="确认报名" :loading="joinLoading" @confirm="confirmJoin">
+    <Modal v-model="showJoinModal" icon="🏆" icon-type="info" title="报名参赛" :subtitle="selectedComp?.name" size="small" confirm-text="确认报名" :loading="joinAction.loading" @confirm="confirmJoin">
       <div v-if="selectedComp" class="join-info">
         <div class="info-row"><span class="label">比赛日期</span><span class="value">{{ selectedComp.date }}</span></div>
         <div class="info-row"><span class="label">比赛地点</span><span class="value">{{ selectedComp.location }}</span></div>
@@ -129,12 +134,13 @@
 import Modal from '../components/Modal.vue'
 import Toast from '../components/Toast.vue'
 import LoginModal from '../components/LoginModal.vue'
+import RequestState from '../components/RequestState.vue'
 import { isAuthenticated } from '../utils/auth'
-import { taskStore } from '../utils/taskStore'
+import { api, createListResource, createAction, errorMessage } from '../utils/api'
 
 export default {
   name: 'Competitions',
-  components: { Modal, Toast, LoginModal },
+  components: { Modal, Toast, LoginModal, RequestState },
   data() {
     return {
       activeTab: 'upcoming',
@@ -142,7 +148,6 @@ export default {
       showSuccessModal: false,
       showLiveModal: false,
       showResultModal: false,
-      joinLoading: false,
       selectedComp: null,
       joinResult: null,
       showToast: false,
@@ -157,17 +162,20 @@ export default {
         { id: 'finished', name: '已结束', icon: '✅' }
       ],
       statusText: { upcoming: '即将开始', ongoing: '进行中', finished: '已结束' },
-      competitions: [
-        { id: 1, name: '2026春季斯诺克公开赛', type: '斯诺克', date: '2026-03-15', location: '主馆A区', prize: 50000, fee: 200, participants: 28, maxParticipants: 32, status: 'upcoming' },
-        { id: 2, name: '周末九球挑战赛', type: '美式九球', date: '2026-02-14', location: '主馆B区', prize: 10000, fee: 100, participants: 16, maxParticipants: 16, status: 'ongoing' },
-        { id: 3, name: '新年中式八球锦标赛', type: '中式八球', date: '2026-01-20', location: '主馆A区', prize: 30000, fee: 150, participants: 64, maxParticipants: 64, status: 'finished' },
-        { id: 4, name: '会员积分争霸赛', type: '综合', date: '2026-04-01', location: '主馆C区', prize: 20000, fee: 50, participants: 12, maxParticipants: 48, status: 'upcoming' },
-        { id: 5, name: '女子台球精英赛', type: '美式九球', date: '2026-03-08', location: '主馆B区', prize: 15000, fee: 80, participants: 8, maxParticipants: 16, status: 'upcoming' }
-      ]
+      // 赛事列表资源：统一 loading/error/重试
+      competitionsRes: createListResource(() => api.getCompetitions()),
+      // 报名提交：统一按钮 loading 与错误反馈
+      joinAction: createAction((payload) => api.joinCompetition(payload))
     }
   },
   computed: {
+    competitions() {
+      return this.competitionsRes.data
+    },
     filteredCompetitions() { return this.competitions.filter(c => c.status === this.activeTab) }
+  },
+  mounted() {
+    this.competitionsRes.run()
   },
   methods: {
     getCount(status) { return this.competitions.filter(c => c.status === status).length },
@@ -198,21 +206,23 @@ export default {
       }
     },
     async confirmJoin() {
-      this.joinLoading = true
-      await new Promise(resolve => setTimeout(resolve, 1500))
-      const regInfo = { 
-        regNo: 'REG' + Date.now().toString().slice(-8), 
-        playerNo: Math.floor(Math.random() * 100) + 1 
+      const result = await this.joinAction.run({ competitionId: this.selectedComp.id })
+      if (!result.success) {
+        this.showNotification('error', '报名失败', errorMessage(result, '赛事报名失败，请稍后重试'))
+        return
       }
-      this.joinResult = { ...regInfo, compName: this.selectedComp.name }
-      
-      // 添加到任务中心
-      taskStore.addCompetitionTask(this.selectedComp, regInfo)
-      
-      this.joinLoading = false
+
+      // 统一响应结构：成功结果统一取自 result.data
+      this.joinResult = result.data
+      // 同步本地列表的报名人数展示
+      this.selectedComp.participants = Math.min(
+        this.selectedComp.participants + 1,
+        this.selectedComp.maxParticipants
+      )
+
       this.showJoinModal = false
       this.showSuccessModal = true
-      
+
       this.showNotification('info', '已添加到任务中心', `您可以在任务中心查看并管理此赛事`)
     },
     viewJoinDetail() {
